@@ -1,0 +1,8 @@
+{
+	"file_format_version" : "1.0.0",
+	"runtime" : 
+	{
+		"library_path" : "out\\build\\x64-Debug\\customxr.dll",
+		"name": "customxr"
+	}
+}
