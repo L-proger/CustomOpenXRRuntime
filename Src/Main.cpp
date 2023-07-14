@@ -6,19 +6,145 @@
 #include <openxr\openxr_platform.h>
 #include <runtime_interface.hpp>
 #include <loader_interfaces.h>
-
 #include <iostream>
+#include <vector>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+
+#include "DxgiUtils.h"
 
 
 #define PRINT_FUNC_CALL std::cout << __FUNCTION__ << std::endl;
 
+struct ViewDescription {
+    uint32_t maxImageRectWidth;
+    uint32_t maxImageRectHeight;
+    uint32_t maxSwapchainSampleCount;
+    uint32_t recommendedImageRectWidth;
+    uint32_t recommendedImageRectHeight;
+    uint32_t recommendedSwapchainSampleCount;
+};
+
+struct ViewConfiguration {
+    XrViewConfigurationType type;
+    std::vector<ViewDescription> viewDescriptions;
+};
+
+
+
+
+class CustomXrSystem {
+public:
+    virtual XrFormFactor getFormFactor() const = 0;
+    virtual std::vector<ViewConfiguration> getViewConfigurations() const = 0;
+};
+
+class CustomHmdXrSystem : public CustomXrSystem {
+public:
+    CustomHmdXrSystem() {
+        ViewDescription desc;
+        desc.maxImageRectWidth = 1920;
+        desc.maxImageRectHeight = 1080;
+        desc.maxSwapchainSampleCount = 1;
+        desc.recommendedImageRectWidth = 1920;
+        desc.recommendedImageRectHeight = 1080;
+        desc.recommendedSwapchainSampleCount = 1;
+
+        ViewConfiguration config;
+        config.type = XrViewConfigurationType::XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        config.viewDescriptions.push_back(desc);
+
+        _viewConfigurations.push_back(config);
+    }
+
+    XrFormFactor getFormFactor() const override {
+        return XrFormFactor::XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    }
+
+    std::vector<ViewConfiguration> getViewConfigurations() const override {
+        return _viewConfigurations;
+    }
+private:
+    std::vector<ViewConfiguration> _viewConfigurations;
+
+};
+
+
+class CustomXrSession {
+public:
+    CustomXrSession(std::shared_ptr<CustomXrSystem> system) : _system(system) {
+
+    }
+private:
+    std::shared_ptr<CustomXrSystem> _system;
+};
+
+class CustomD3D11XrSession : public CustomXrSession {
+public:
+    CustomD3D11XrSession(std::shared_ptr<CustomXrSystem> system, ID3D11Device* device) : CustomXrSession(system) {
+        _device = device;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Device> getDevice() {
+        return _device;
+    }
+private:
+    Microsoft::WRL::ComPtr<ID3D11Device> _device;
+};
+
+class CustomXrInstance {
+public:
+    CustomXrInstance(const XrInstanceCreateInfo* createInfo) {
+        _systems.push_back(std::make_shared<CustomHmdXrSystem>());
+    }
+
+    void getProperties(XrInstanceProperties* props) {
+        strcpy(props->runtimeName, "customxr");
+        props->runtimeVersion = XR_MAKE_VERSION(0, 1, 0);
+    }
+
+    std::optional<XrSystemId> getSystemId(XrFormFactor formFactor) const {
+        for (std::size_t i = 0; i < _systems.size(); ++i) {
+            if (_systems[i]->getFormFactor() == formFactor) {
+                return i + 1;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::shared_ptr<CustomXrSystem> getSystem(XrSystemId id) {
+        auto realId = id - 1;
+        if (realId >= _systems.size()) {
+            return nullptr;
+        }
+        return _systems[realId];
+    }
+
+private:
+    std::vector<std::shared_ptr<CustomXrSystem>> _systems;
+};
+
+
+
+CustomXrInstance* fromOpenXrPtr(XrInstance xrValue) {
+    return reinterpret_cast<CustomXrInstance*>(xrValue);
+}
+
+XrInstance toOpenXrPtr(CustomXrInstance* value) {
+    return reinterpret_cast<XrInstance>(value);
+}
+
+CustomXrSession* fromOpenXrPtr(XrSession xrValue) {
+    return reinterpret_cast<CustomXrSession*>(xrValue);
+}
+
+XrSession toOpenXrPtr(CustomXrSession* value) {
+    return reinterpret_cast<XrSession>(value);
+}
+
 extern "C" {
 
-    static XrInstance _lastInstance = {};
-    static XrSystemId hmdSystemID = XrSystemId(23);
-    static XrSystemId handheldSystemID = XrSystemId(20);
-
-    static XrSession _lastSession = {};
     static XrSpace _lastSpace = {};
     static XrSpace _lastActionSpace = {};
 
@@ -178,8 +304,14 @@ extern "C" {
 
     XrResult XRAPI_PTR xrGetD3D11GraphicsRequirementsKHR(XrInstance instance, XrSystemId systemId, XrGraphicsRequirementsD3D11KHR* graphicsRequirements) {
         PRINT_FUNC_CALL;
+
+        DxgiUtils dxgiUtils;
+        auto adapters = dxgiUtils.enumerateAdapters();
+        auto adapter = adapters[0];
+        auto adapterLuid = dxgiUtils.getAdapterLuid(adapter);
         graphicsRequirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
-        graphicsRequirements->adapterLuid = {};
+        graphicsRequirements->adapterLuid = adapterLuid;
+
         return XrResult::XR_SUCCESS;
     }
 
@@ -409,29 +541,37 @@ extern "C" {
 
     XrResult XRAPI_PTR xrEnumerateViewConfigurationViews(XrInstance instance, XrSystemId systemId, XrViewConfigurationType viewConfigurationType, uint32_t viewCapacityInput, uint32_t* viewCountOutput, XrViewConfigurationView* views) {
         PRINT_FUNC_CALL;
-        if (viewCapacityInput == 0) {
-            *viewCountOutput = 2;
-            return XrResult::XR_SUCCESS;
-        }
 
-        views[0].maxImageRectWidth = 1920;
-        views[0].maxImageRectHeight = 1080;
-        views[0].maxSwapchainSampleCount = 1;
-        views[0].recommendedImageRectWidth = 1920;
-        views[0].recommendedImageRectHeight = 1080;
-        views[0].recommendedSwapchainSampleCount = 1;
-        *viewCountOutput = 1;
-        if (viewCapacityInput == 2) {
-            views[1].maxImageRectWidth = 1920;
-            views[1].maxImageRectHeight = 1080;
-            views[1].maxSwapchainSampleCount = 1;
-            views[1].recommendedImageRectWidth = 1920;
-            views[1].recommendedImageRectHeight = 1080;
-            views[1].recommendedSwapchainSampleCount = 1;
-            *viewCountOutput = 2;
-        }
-        return XrResult::XR_SUCCESS;
+        auto instancePtr = reinterpret_cast<CustomXrInstance*>(instance);
+        auto system = instancePtr->getSystem(systemId);
+        auto viewConfigs = system->getViewConfigurations();
 
+        for (auto& config : viewConfigs) {
+            if (config.type == viewConfigurationType) {
+                *viewCountOutput = static_cast<std::uint32_t>(config.viewDescriptions.size());
+
+                if (viewCapacityInput == 0) {
+                    return XrResult::XR_SUCCESS;
+                }
+                
+                if (viewCapacityInput < static_cast<std::uint32_t>(config.viewDescriptions.size())) {
+                    return XrResult::XR_ERROR_SIZE_INSUFFICIENT;
+                }
+
+                for (std::size_t i = 0; i < config.viewDescriptions.size(); ++i) {
+                    views[i].type = XrStructureType::XR_TYPE_VIEW_CONFIGURATION_VIEW;
+                    views[i].maxImageRectWidth = config.viewDescriptions[i].maxImageRectWidth;
+                    views[i].maxImageRectHeight = config.viewDescriptions[i].maxImageRectHeight;
+                    views[i].maxSwapchainSampleCount = config.viewDescriptions[i].maxSwapchainSampleCount;
+                    views[i].recommendedImageRectWidth = config.viewDescriptions[i].recommendedImageRectWidth;
+                    views[i].recommendedImageRectHeight = config.viewDescriptions[i].recommendedImageRectHeight;
+                    views[i].recommendedSwapchainSampleCount = config.viewDescriptions[i].recommendedSwapchainSampleCount;
+                }
+
+                return XrResult::XR_SUCCESS;
+            }
+        }
+        return XrResult::XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
     }
 
     XrResult XRAPI_PTR xrGetViewConfigurationProperties(XrInstance instance, XrSystemId systemId, XrViewConfigurationType viewConfigurationType, XrViewConfigurationProperties* configurationProperties) {
@@ -444,16 +584,24 @@ extern "C" {
 
     XrResult XRAPI_PTR xrEnumerateViewConfigurations(XrInstance instance, XrSystemId systemId, uint32_t viewConfigurationTypeCapacityInput, uint32_t* viewConfigurationTypeCountOutput, XrViewConfigurationType* viewConfigurationTypes) {
         PRINT_FUNC_CALL;
+
+        auto instancePtr = fromOpenXrPtr(instance);
+        auto system = instancePtr->getSystem(systemId);
+        auto viewConfigs = system->getViewConfigurations();
+
+        *viewConfigurationTypeCountOutput = static_cast<uint32_t>(viewConfigs.size());
+
         if (viewConfigurationTypeCapacityInput == 0) {
-            *viewConfigurationTypeCountOutput = 2;
             return XrResult::XR_SUCCESS;
         }
-        viewConfigurationTypes[0] = XrViewConfigurationType::XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-        if (viewConfigurationTypeCapacityInput > 1) {
-            viewConfigurationTypes[1] = XrViewConfigurationType::XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO;
+
+        if (viewConfigurationTypeCapacityInput < static_cast<uint32_t>(viewConfigs.size())) {
+            return XrResult::XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *viewConfigurationTypeCountOutput = viewConfigurationTypeCapacityInput;
+        for (std::size_t i = 0; i < viewConfigs.size(); ++i) {
+            viewConfigurationTypes[i] = viewConfigs[i].type;
+        }
         
         return XrResult::XR_SUCCESS;
     }
@@ -514,7 +662,8 @@ extern "C" {
 
     XrResult XRAPI_PTR xrDestroySession(XrSession session) {
         PRINT_FUNC_CALL;
-        _lastSession = {};
+        auto sessionPtr = fromOpenXrPtr(session);
+        delete sessionPtr;
         return XrResult::XR_SUCCESS;
     }
 
@@ -527,13 +676,17 @@ extern "C" {
                     return XrResult::XR_ERROR_GRAPHICS_DEVICE_INVALID;
                 }
                 else {
+                    auto instancePtr = fromOpenXrPtr(instance);
+                    auto system = instancePtr->getSystem(createInfo->systemId);
+                    auto sessionPtr = new CustomD3D11XrSession(system, d3d11Params->device);
                     std::cout << "Received D3D11 device" << std::endl;
+                    *session = toOpenXrPtr(sessionPtr);
+                    return XrResult::XR_SUCCESS;
                 }
             }
         }
 
-        _lastSession = XrSession(234);
-        return XrResult::XR_SUCCESS;
+        return XrResult::XR_ERROR_GRAPHICS_DEVICE_INVALID;
     }
 
     XrResult XRAPI_PTR xrEnumerateEnvironmentBlendModes(XrInstance instance, XrSystemId systemId, XrViewConfigurationType viewConfigurationType, uint32_t environmentBlendModeCapacityInput, uint32_t* environmentBlendModeCountOutput, XrEnvironmentBlendMode* environmentBlendModes) {
@@ -553,9 +706,9 @@ extern "C" {
 
     XrResult XRAPI_PTR xrGetSystemProperties(XrInstance instance, XrSystemId systemId, XrSystemProperties* properties) {
         PRINT_FUNC_CALL;
-        if (instance != _lastInstance) {
+       // if (instance != _lastInstance) {
             return XrResult::XR_ERROR_HANDLE_INVALID;
-        }
+   //     }
 
         properties->systemId = systemId;
         properties->vendorId = 0xA0BB;
@@ -565,9 +718,9 @@ extern "C" {
         properties->graphicsProperties.maxSwapchainImageWidth = 3840;
         properties->graphicsProperties.maxSwapchainImageHeight = 2160;
 
-        if (systemId == hmdSystemID) {
+        if (systemId == 0) {
             strcpy(properties->systemName, "customhmd");
-        }if (systemId == handheldSystemID) {
+        }if (systemId == 0) {
             strcpy(properties->systemName, "customhandheld");
         }
         else {
@@ -578,15 +731,12 @@ extern "C" {
 
     XrResult XRAPI_PTR xrGetSystem(XrInstance instance, const XrSystemGetInfo* getInfo, XrSystemId* systemId){
         PRINT_FUNC_CALL;
-
-        if (getInfo->formFactor == XrFormFactor::XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY) {
-            *systemId = hmdSystemID;
-            return XrResult::XR_SUCCESS;
-        }else if (getInfo->formFactor == XrFormFactor::XR_FORM_FACTOR_HANDHELD_DISPLAY) {
-            *systemId = handheldSystemID;
+        auto instancePtr = reinterpret_cast<CustomXrInstance*>(instance);
+        auto id = instancePtr->getSystemId(getInfo->formFactor);
+        if (id.has_value()) {
+            *systemId = id.value();
             return XrResult::XR_SUCCESS;
         }
-
         return XrResult::XR_ERROR_FORM_FACTOR_UNSUPPORTED;
     }
 
@@ -609,22 +759,24 @@ extern "C" {
 
     XrResult XRAPI_PTR xrGetInstanceProperties(XrInstance instance, XrInstanceProperties* instanceProperties) {
         PRINT_FUNC_CALL;
-        strcpy(instanceProperties->runtimeName, "customxr");
-        instanceProperties->runtimeVersion = XR_MAKE_VERSION(0, 1, 0);
+        auto ptr = reinterpret_cast<CustomXrInstance*>(instance);
+        if (ptr != nullptr) {
+            ptr->getProperties(instanceProperties);
+        }
         return XrResult::XR_SUCCESS;
     }
 
     XrResult XRAPI_PTR xrDestroyInstance(XrInstance instance) {
         PRINT_FUNC_CALL;
+        auto ptr = reinterpret_cast<CustomXrInstance*>(instance);
+        delete ptr;
         return XrResult::XR_SUCCESS;
     }
 
     XrResult XRAPI_PTR xrCreateInstance(const XrInstanceCreateInfo* createInfo, XrInstance* instance) {
         PRINT_FUNC_CALL;
-        _lastInstance = (XrInstance)123;
-        *instance = _lastInstance;
-
-
+        auto result = new CustomXrInstance(createInfo);
+        *instance = reinterpret_cast<XrInstance>(result);
         return XrResult::XR_SUCCESS;
     }
 
@@ -718,49 +870,6 @@ extern "C" {
         RETURN_PROC_ADDR(xrGetInputSourceLocalizedName);
         RETURN_PROC_ADDR(xrStopHapticFeedback);
         RETURN_PROC_ADDR(xrApplyHapticFeedback);
-        RETURN_NULL_PROC_ADDR(xrGetOpenGLGraphicsRequirementsKHR)
-        RETURN_NULL_PROC_ADDR(xrGetVulkanInstanceExtensionsKHR)
-        RETURN_NULL_PROC_ADDR(xrGetVulkanDeviceExtensionsKHR)
-        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsDeviceKHR)
-        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsRequirementsKHR)
-
-        RETURN_NULL_PROC_ADDR(xrConvertTimespecTimeToTimeKHR)
-        RETURN_NULL_PROC_ADDR(xrConvertTimeToTimespecTimeKHR)
-
-        RETURN_NULL_PROC_ADDR(xrGetD3D12GraphicsRequirementsKHR)
-        RETURN_NULL_PROC_ADDR(xrCreateVulkanInstanceKHR)
-        RETURN_NULL_PROC_ADDR(xrCreateVulkanDeviceKHR)
-        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsDevice2KHR)
-        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsRequirements2KHR)
-        RETURN_NULL_PROC_ADDR(xrThermalGetTemperatureTrendEXT)
-        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorMSFT)
-        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorSpaceMSFT)
-        RETURN_NULL_PROC_ADDR(xrDestroySpatialAnchorMSFT)
-        RETURN_NULL_PROC_ADDR(xrCreateSpatialGraphNodeSpaceMSFT)
-        RETURN_NULL_PROC_ADDR(xrTryCreateSpatialGraphStaticNodeBindingMSFT)
-        RETURN_NULL_PROC_ADDR(xrDestroySpatialGraphNodeBindingMSFT)
-        RETURN_NULL_PROC_ADDR(xrGetSpatialGraphNodeBindingPropertiesMSFT)
-        RETURN_NULL_PROC_ADDR(xrCreateHandMeshSpaceMSFT)
-        RETURN_NULL_PROC_ADDR(xrUpdateHandMeshMSFT)
-        RETURN_NULL_PROC_ADDR(xrGetControllerModelKeyMSFT)
-        RETURN_NULL_PROC_ADDR(xrLoadControllerModelMSFT)
-        RETURN_NULL_PROC_ADDR(xrGetControllerModelPropertiesMSFT)
-        RETURN_NULL_PROC_ADDR(xrGetControllerModelStateMSFT)
-        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorFromPerceptionAnchorMSFT)
-        RETURN_NULL_PROC_ADDR(xrTryGetPerceptionAnchorFromSpatialAnchorMSFT)
-        RETURN_NULL_PROC_ADDR(xrEnumerateReprojectionModesMSFT)
-        RETURN_NULL_PROC_ADDR(xrEnumerateSceneComputeFeaturesMSFT)
-        RETURN_NULL_PROC_ADDR(xrCreateSceneObserverMSFT)
-        RETURN_NULL_PROC_ADDR(xrDestroySceneObserverMSFT) 
-        RETURN_NULL_PROC_ADDR(xrCreateSceneMSFT)
-        RETURN_NULL_PROC_ADDR(xrDestroySceneMSFT)
-        RETURN_NULL_PROC_ADDR(xrComputeNewSceneMSFT)
-        RETURN_NULL_PROC_ADDR(xrGetSceneComputeStateMSFT)
-
-            
-
-            
-            
         RETURN_PROC_ADDR(xrGetD3D11GraphicsRequirementsKHR);
         RETURN_PROC_ADDR(xrGetVisibilityMaskKHR);
         RETURN_PROC_ADDR(xrConvertWin32PerformanceCounterToTimeKHR);
@@ -773,46 +882,112 @@ extern "C" {
         RETURN_PROC_ADDR(xrSessionBeginDebugUtilsLabelRegionEXT);
         RETURN_PROC_ADDR(xrSessionEndDebugUtilsLabelRegionEXT);
         RETURN_PROC_ADDR(xrSessionInsertDebugUtilsLabelEXT);
-
-
         RETURN_PROC_ADDR(xrSetInputDeviceActiveEXT);
         RETURN_PROC_ADDR(xrSetInputDeviceStateBoolEXT);
         RETURN_PROC_ADDR(xrSetInputDeviceStateFloatEXT);
         RETURN_PROC_ADDR(xrSetInputDeviceStateVector2fEXT);
         RETURN_PROC_ADDR(xrSetInputDeviceLocationEXT);
-
         RETURN_PROC_ADDR(xrCreateHandTrackerEXT);
         RETURN_PROC_ADDR(xrDestroyHandTrackerEXT);
         RETURN_PROC_ADDR(xrLocateHandJointsEXT);
 
+        RETURN_NULL_PROC_ADDR(xrGetOpenGLGraphicsRequirementsKHR);
+        RETURN_NULL_PROC_ADDR(xrGetVulkanInstanceExtensionsKHR);
+        RETURN_NULL_PROC_ADDR(xrGetVulkanDeviceExtensionsKHR);
+        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsDeviceKHR);
+        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsRequirementsKHR);
+        RETURN_NULL_PROC_ADDR(xrConvertTimespecTimeToTimeKHR);
+        RETURN_NULL_PROC_ADDR(xrConvertTimeToTimespecTimeKHR);
+        RETURN_NULL_PROC_ADDR(xrGetD3D12GraphicsRequirementsKHR);
+        RETURN_NULL_PROC_ADDR(xrCreateVulkanInstanceKHR);
+        RETURN_NULL_PROC_ADDR(xrCreateVulkanDeviceKHR);
+        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsDevice2KHR);
+        RETURN_NULL_PROC_ADDR(xrGetVulkanGraphicsRequirements2KHR);
+        RETURN_NULL_PROC_ADDR(xrThermalGetTemperatureTrendEXT);
 
-        RETURN_PROC_ADDR(xrUpdateSwapchainFB);
-        RETURN_PROC_ADDR(xrGetSwapchainStateFB);
+        //Varjo
+        RETURN_NULL_PROC_ADDR(xrSetEnvironmentDepthEstimationVARJO);
+        RETURN_NULL_PROC_ADDR(xrSetMarkerTrackingVARJO);
+        RETURN_NULL_PROC_ADDR(xrSetMarkerTrackingTimeoutVARJO);
+        RETURN_NULL_PROC_ADDR(xrSetMarkerTrackingPredictionVARJO);
+        RETURN_NULL_PROC_ADDR(xrGetMarkerSizeVARJO);
+        RETURN_NULL_PROC_ADDR(xrCreateMarkerSpaceVARJO);
+        RETURN_NULL_PROC_ADDR(xrSetViewOffsetVARJO);
 
-        
-        RETURN_PROC_ADDR(xrCreateBodyTrackerFB);
-        RETURN_PROC_ADDR(xrDestroyBodyTrackerFB);
-        RETURN_PROC_ADDR(xrLocateBodyJointsFB);
-        RETURN_PROC_ADDR(xrGetBodySkeletonFB);
-
+        //Microsoft
         RETURN_NULL_PROC_ADDR(xrGetSceneComponentsMSFT);
         RETURN_NULL_PROC_ADDR(xrLocateSceneComponentsMSFT);
         RETURN_NULL_PROC_ADDR(xrGetSceneMeshBuffersMSFT);
         RETURN_NULL_PROC_ADDR(xrDeserializeSceneMSFT);
         RETURN_NULL_PROC_ADDR(xrGetSerializedSceneFragmentDataMSFT);
-        RETURN_NULL_PROC_ADDR(xrEnumerateViveTrackerPathsHTCX);
+        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorStoreConnectionMSFT);
+        RETURN_NULL_PROC_ADDR(xrDestroySpatialAnchorStoreConnectionMSFT);
+        RETURN_NULL_PROC_ADDR(xrPersistSpatialAnchorMSFT);
+        RETURN_NULL_PROC_ADDR(xrEnumeratePersistedSpatialAnchorNamesMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorFromPersistedNameMSFT);
+        RETURN_NULL_PROC_ADDR(xrUnpersistSpatialAnchorMSFT);
+        RETURN_NULL_PROC_ADDR(xrClearSpatialAnchorStoreMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorSpaceMSFT);
+        RETURN_NULL_PROC_ADDR(xrDestroySpatialAnchorMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateSpatialGraphNodeSpaceMSFT);
+        RETURN_NULL_PROC_ADDR(xrTryCreateSpatialGraphStaticNodeBindingMSFT);
+        RETURN_NULL_PROC_ADDR(xrDestroySpatialGraphNodeBindingMSFT);
+        RETURN_NULL_PROC_ADDR(xrGetSpatialGraphNodeBindingPropertiesMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateHandMeshSpaceMSFT);
+        RETURN_NULL_PROC_ADDR(xrUpdateHandMeshMSFT);
+        RETURN_NULL_PROC_ADDR(xrGetControllerModelKeyMSFT);
+        RETURN_NULL_PROC_ADDR(xrLoadControllerModelMSFT);
+        RETURN_NULL_PROC_ADDR(xrGetControllerModelPropertiesMSFT);
+        RETURN_NULL_PROC_ADDR(xrGetControllerModelStateMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorFromPerceptionAnchorMSFT);
+        RETURN_NULL_PROC_ADDR(xrTryGetPerceptionAnchorFromSpatialAnchorMSFT);
+        RETURN_NULL_PROC_ADDR(xrEnumerateReprojectionModesMSFT);
+        RETURN_NULL_PROC_ADDR(xrEnumerateSceneComputeFeaturesMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateSceneObserverMSFT);
+        RETURN_NULL_PROC_ADDR(xrDestroySceneObserverMSFT);
+        RETURN_NULL_PROC_ADDR(xrCreateSceneMSFT);
+        RETURN_NULL_PROC_ADDR(xrDestroySceneMSFT);
+        RETURN_NULL_PROC_ADDR(xrComputeNewSceneMSFT);
+        RETURN_NULL_PROC_ADDR(xrGetSceneComputeStateMSFT);
 
-        
+        //Almalence
+        RETURN_NULL_PROC_ADDR(xrSetDigitalLensControlALMALENCE);
 
+        //Fb
+        RETURN_PROC_ADDR(xrUpdateSwapchainFB);
+        RETURN_PROC_ADDR(xrGetSwapchainStateFB);
+        RETURN_PROC_ADDR(xrCreateBodyTrackerFB);
+        RETURN_PROC_ADDR(xrDestroyBodyTrackerFB);
+        RETURN_PROC_ADDR(xrLocateBodyJointsFB);
+        RETURN_PROC_ADDR(xrGetBodySkeletonFB);
         RETURN_PROC_ADDR(xrEnumerateDisplayRefreshRatesFB);
         RETURN_PROC_ADDR(xrGetDisplayRefreshRateFB);
         RETURN_PROC_ADDR(xrRequestDisplayRefreshRateFB);
-        
-        RETURN_NULL_PROC_ADDR(xrCreateFacialTrackerHTC);
-        RETURN_NULL_PROC_ADDR(xrDestroyFacialTrackerHTC);
-        RETURN_NULL_PROC_ADDR(xrGetFacialExpressionsHTC);
-
-
+        RETURN_NULL_PROC_ADDR(xrShareSpacesFB);
+        RETURN_NULL_PROC_ADDR(xrGetSpaceBoundingBox2DFB);
+        RETURN_NULL_PROC_ADDR(xrGetSpaceBoundingBox3DFB);
+        RETURN_NULL_PROC_ADDR(xrGetSpaceSemanticLabelsFB);
+        RETURN_NULL_PROC_ADDR(xrGetSpaceBoundary2DFB);
+        RETURN_NULL_PROC_ADDR(xrGetSpaceRoomLayoutFB)
+        RETURN_NULL_PROC_ADDR(xrRequestSceneCaptureFB);
+        RETURN_NULL_PROC_ADDR(xrGetSpaceContainerFB);
+        RETURN_NULL_PROC_ADDR(xrQuerySpacesFB);
+        RETURN_NULL_PROC_ADDR(xrRetrieveSpaceQueryResultsFB);
+        RETURN_NULL_PROC_ADDR(xrSaveSpaceFB);
+        RETURN_NULL_PROC_ADDR(xrEraseSpaceFB);
+        RETURN_NULL_PROC_ADDR(xrCreateFaceTrackerFB);
+        RETURN_NULL_PROC_ADDR(xrDestroyFaceTrackerFB);
+        RETURN_NULL_PROC_ADDR(xrGetFaceExpressionWeightsFB);
+        RETURN_NULL_PROC_ADDR(xrCreateEyeTrackerFB);
+        RETURN_NULL_PROC_ADDR(xrDestroyEyeTrackerFB);
+        RETURN_NULL_PROC_ADDR(xrGetEyeGazesFB);
+        RETURN_NULL_PROC_ADDR(xrPassthroughLayerSetKeyboardHandsIntensityFB);
+        RETURN_NULL_PROC_ADDR(xrGetDeviceSampleRateFB);
+        RETURN_NULL_PROC_ADDR(xrSaveSpaceListFB);
+        RETURN_NULL_PROC_ADDR(xrCreateSpaceUserFB);
+        RETURN_NULL_PROC_ADDR(xrGetSpaceUserIdFB);
+        RETURN_NULL_PROC_ADDR(xrDestroySpaceUserFB);
         RETURN_NULL_PROC_ADDR(xrEnumerateColorSpacesFB);
         RETURN_NULL_PROC_ADDR(xrSetColorSpaceFB);
         RETURN_NULL_PROC_ADDR(xrGetHandMeshFB);
@@ -848,127 +1023,54 @@ extern "C" {
         RETURN_NULL_PROC_ADDR(xrEnumerateRenderModelPathsFB);
         RETURN_NULL_PROC_ADDR(xrGetRenderModelPropertiesFB);
         RETURN_NULL_PROC_ADDR(xrLoadRenderModelFB);
-
-
-        RETURN_NULL_PROC_ADDR(xrSetEnvironmentDepthEstimationVARJO);
-        RETURN_NULL_PROC_ADDR(xrSetMarkerTrackingVARJO);
-        RETURN_NULL_PROC_ADDR(xrSetMarkerTrackingTimeoutVARJO);
-        RETURN_NULL_PROC_ADDR(xrSetMarkerTrackingPredictionVARJO);
-        RETURN_NULL_PROC_ADDR(xrGetMarkerSizeVARJO);
-        RETURN_NULL_PROC_ADDR(xrCreateMarkerSpaceVARJO);
-        RETURN_NULL_PROC_ADDR(xrSetViewOffsetVARJO);
-        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorStoreConnectionMSFT);
-        RETURN_NULL_PROC_ADDR(xrDestroySpatialAnchorStoreConnectionMSFT);
-        RETURN_NULL_PROC_ADDR(xrPersistSpatialAnchorMSFT);
-        RETURN_NULL_PROC_ADDR(xrEnumeratePersistedSpatialAnchorNamesMSFT);
-        RETURN_NULL_PROC_ADDR(xrCreateSpatialAnchorFromPersistedNameMSFT);
-        RETURN_NULL_PROC_ADDR(xrUnpersistSpatialAnchorMSFT);
-        RETURN_NULL_PROC_ADDR(xrClearSpatialAnchorStoreMSFT);
-        RETURN_NULL_PROC_ADDR(xrQuerySpacesFB);
-        RETURN_NULL_PROC_ADDR(xrRetrieveSpaceQueryResultsFB);
-        RETURN_NULL_PROC_ADDR(xrSaveSpaceFB);
-        RETURN_NULL_PROC_ADDR(xrEraseSpaceFB);
-
-
-
+        
+        //Oculus
+        RETURN_NULL_PROC_ADDR(xrEnumerateExternalCamerasOCULUS);
         RETURN_NULL_PROC_ADDR(xrGetAudioOutputDeviceGuidOculus);
         RETURN_NULL_PROC_ADDR(xrGetAudioInputDeviceGuidOculus);
-        RETURN_NULL_PROC_ADDR(xrShareSpacesFB);
-        RETURN_NULL_PROC_ADDR(xrGetSpaceBoundingBox2DFB);
-        RETURN_NULL_PROC_ADDR(xrGetSpaceBoundingBox3DFB);
-        RETURN_NULL_PROC_ADDR(xrGetSpaceSemanticLabelsFB);
-        RETURN_NULL_PROC_ADDR(xrGetSpaceBoundary2DFB);
-        RETURN_NULL_PROC_ADDR(xrGetSpaceRoomLayoutFB);
 
+        //Qualcomm
+        RETURN_NULL_PROC_ADDR(xrSetTrackingOptimizationSettingsHintQCOM);
 
-        RETURN_NULL_PROC_ADDR(xrSetDigitalLensControlALMALENCE);
-        RETURN_NULL_PROC_ADDR(xrRequestSceneCaptureFB);
-        RETURN_NULL_PROC_ADDR(xrGetSpaceContainerFB);
+        //Htc
+        RETURN_NULL_PROC_ADDR(xrCreatePassthroughHTC);
+        RETURN_NULL_PROC_ADDR(xrDestroyPassthroughHTC);
+        RETURN_NULL_PROC_ADDR(xrApplyFoveationHTC);
+        RETURN_NULL_PROC_ADDR(xrCreateFacialTrackerHTC);
+        RETURN_NULL_PROC_ADDR(xrDestroyFacialTrackerHTC);
+        RETURN_NULL_PROC_ADDR(xrGetFacialExpressionsHTC);
+        RETURN_NULL_PROC_ADDR(xrEnumerateViveTrackerPathsHTCX);
 
-        RETURN_NULL_PROC_ADDR(xrGetFoveationEyeTrackedStateMETA);
-        RETURN_NULL_PROC_ADDR(xrCreateFaceTrackerFB);
-        RETURN_NULL_PROC_ADDR(xrDestroyFaceTrackerFB);
-        RETURN_NULL_PROC_ADDR(xrGetFaceExpressionWeightsFB);
-        RETURN_NULL_PROC_ADDR(xrCreateEyeTrackerFB);
-        RETURN_NULL_PROC_ADDR(xrDestroyEyeTrackerFB);
-        RETURN_NULL_PROC_ADDR(xrGetEyeGazesFB);
-        RETURN_NULL_PROC_ADDR(xrPassthroughLayerSetKeyboardHandsIntensityFB);
-        RETURN_NULL_PROC_ADDR(xrGetDeviceSampleRateFB);
-
-        
-        RETURN_NULL_PROC_ADDR(xrEnumerateExternalCamerasOCULUS);
+        //Meta
         RETURN_NULL_PROC_ADDR(xrEnumeratePerformanceMetricsCounterPathsMETA);
         RETURN_NULL_PROC_ADDR(xrSetPerformanceMetricsStateMETA);
         RETURN_NULL_PROC_ADDR(xrGetPerformanceMetricsStateMETA);
         RETURN_NULL_PROC_ADDR(xrQueryPerformanceMetricsCounterMETA);
-        RETURN_NULL_PROC_ADDR(xrSaveSpaceListFB);
-        RETURN_NULL_PROC_ADDR(xrCreateSpaceUserFB);
-        RETURN_NULL_PROC_ADDR(xrGetSpaceUserIdFB);
-        RETURN_NULL_PROC_ADDR(xrDestroySpaceUserFB);
+        RETURN_NULL_PROC_ADDR(xrGetFoveationEyeTrackedStateMETA);
 
-
-        RETURN_NULL_PROC_ADDR(xrSetTrackingOptimizationSettingsHintQCOM);
-        RETURN_NULL_PROC_ADDR(xrCreatePassthroughHTC);
-        RETURN_NULL_PROC_ADDR(xrDestroyPassthroughHTC);
-        RETURN_NULL_PROC_ADDR(xrApplyFoveationHTC);
-
-
+        //Mndx
         RETURN_NULL_PROC_ADDR(xrApplyForceFeedbackCurlMNDX);
 
+        const char* vendorSuffixes[] = {
+            "MSFT",
+            "HTCX",
+            "HTC",
+            "VARJO",
+            "FB",
+            "Oculus",
+            "ALMALENCE",
+            "META",
+            "OCULUS",
+            "QCOM",
+            "MNDX"
+        };
 
-
-
-        if (hasEnding(name, "MSFT")) {
-            std::cout << "MSFT function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
+        for (std::size_t i = 0; i < std::extent_v<decltype(vendorSuffixes)>; ++i) {
+            if (hasEnding(name, vendorSuffixes[i])) {
+                std::cout << "Skip vendor function: " << name << std::endl;
+                return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
+            }
         }
-        if (hasEnding(name, "HTCX") || hasEnding(name, "HTC")) {
-            std::cout << "HTC function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-
-        if (hasEnding(name, "VARJO")) {
-            std::cout << "VARJO function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-
-        //
-        if (hasEnding(name, "FB")) {
-            std::cout << "FB function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-
-        if (hasEnding(name, "Oculus")) {
-            std::cout << "Oculus function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-
-        if (hasEnding(name, "ALMALENCE")) {
-            std::cout << "ALMALENCE function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-
-        if (hasEnding(name, "META")) {
-            std::cout << "META function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-        if (hasEnding(name, "OCULUS")) {
-            std::cout << "OCULUS function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-
-        if (hasEnding(name, "QCOM")) {
-            std::cout << "QCOM function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-        if (hasEnding(name, "MNDX")) {
-            std::cout << "MNDX function: " << name << std::endl;
-            return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
-
-
-        
-        
 
         *function = nullptr;
         return XrResult::XR_ERROR_FUNCTION_UNSUPPORTED;

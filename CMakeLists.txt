@@ -8,7 +8,8 @@ add_library(customxr SHARED)
 
 target_sources(customxr
 PRIVATE
-    src/Main.cpp
+   "Src/Main.cpp"
+   "Src/DxgiUtils.h"
 )
 
 target_include_directories(customxr
